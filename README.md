@@ -12,17 +12,25 @@ Android 6.0+ devices rooted with [Magisk](https://github.com/topjohnwu/Magisk)
 
 ### Install
 
-* Automatically
+* From Magisk Manager
 
   1. Search "Riru" in Magisk Manager
   2. Install the module named "Riru"
+
+  > The Magisk version requirement is enforced by Magisk Manager. At the time of the release of Magisk v21.1, the requirement is v20.4.
 
 * Manually
 
   1. Download the zip from [GitHub release](https://github.com/RikkaApps/Riru/releases)
   2. Install in Magisk Manager (Modules - Install from storage - Select downloaded zip)
 
-**Before Magisk canary 21006, the first installation requires manual restart twice.**
+* "Riru" app (show Riru status)
+
+  [Download](https://github.com/RikkaApps/Riru/releases/download/v23.0/riru-v23.0.r235.d313e94.apk)
+
+**If you are use other modules that changes `ro.dalvik.vm.native.bridge`, Riru will not work.** (Riru will automatically set it back)
+
+A typical example is, some "optimize" modules changes this property. Since changing this property is meaningless for "optimization", their quality is very questionable. In fact, changing properties for optimization is a joke.
 
 ### Config
 
@@ -49,9 +57,7 @@ From v22.0, Riru provide a hide mechanism (idea from [Haruue Icymoon](https://gi
 
 ## Build
 
-> Android Studio (at least until 4.2 Canary 13) can't correctly handle local module using prefab, you may have to manually run ":riru:assembleDebug" to make Android Studio happy
-
-Run gradle task `:riru:assembleRelease` `:core:assembleRelease` task from Android Studio or the terminal, zip will be saved to `out`.
+Run gradle task `:riru:assembleRelease` task from Android Studio or the terminal, zip will be saved to `out`.
 
 ## Module template
 

@@ -1,16 +1,48 @@
 # Riru
 
-Inject zygote process by replacing libmemtrack, provide the ability for Riru modules to run their code in apps' or system server's process.
+Riru only does one thing, inject into zygote in order to allow modules run their codes in apps or the system server.
 
-All other Riru modules requires Riru installed to work.
+All other Riru modules requires Riru.
 
 See [https://github.com/RikkaApps/Riru](https://github.com/RikkaApps/Riru) for more details.
 
+### Note
+
+If you are use other modules that changes `ro.dalvik.vm.native.bridge`, Riru will not work. (Riru will automatically set it back)
+
+A typical example is, some "optimize" modules changes this property. Since changing this property is meaningless for "optimization", their quality is very questionable. In fact, changing properties for optimization is a joke.
+
+### Config
+
+* When the file `/data/adb/riru/disable` exists, Riru will do nothing
+* When the file `/data/adb/riru/enable_hide` exists, the hide mechanism will be enabled
+
 ## Changelog
 
-### v22.0 (37) (2020-10-09)
+### v23.1 (51) (2020-12-18)
 
-- Hide mechanism
+- Restart zygote even for the first time (for "broken environment", such as modules are loaded after than zygote is started)
+- Hide should work for pre-Android-10
+- Prevent crash caused by hiding failure
+
+### v23.0 (49) (2020-12-02)
+
+- Add read file & read dir function for "rirud". Modules can use this to read files that zygote itself has no permission to access.
+
+### v22.4 (46) (2020-11-26)
+
+Magisk's `sepolicy.rule` does not work on some devices and no one report to Magisk 😒. Versions from 22.1 to 22.4 attempt to workaround it.
+
+- Add a socket runs under `u:r:zygote:s0 context` to handle all file operations from zygote (Riru)
+- For Magisk < v21.1, reboot twice is no longer required
+
+### v22.0 (41) (2020-10-09)
+
+Riru v22 has a new hide mechanism which makes detection "not that easy".
+
+Because of this, all modules must change. If your module hasn't updated, ask the module developer to make changes. **For 99% modules, this is super easy.**
+
+**Before Magisk v21.1, you have to manually reboot the device twice.**
 
 ### v21.3 (36) (2020-07-01)
 
