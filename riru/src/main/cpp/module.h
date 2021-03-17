@@ -1,22 +1,23 @@
 #pragma once
 
 #include <jni.h>
+#include <dlfcn.h>
 #include <string>
-#include <map>
 #include <vector>
-#include "api.h"
+#include <riru.h>
 
 #define MODULE_NAME_CORE "core"
 
 struct RiruModule {
 
 public:
-    const char *name;
+    const char *id;
+    const char *path;
+    const char *magisk_module_path;
     int apiVersion;
     uint32_t token;
 
     void *handle{};
-    std::map<std::string, void *> *funcs;
 
     int supportHide;
     int version;
@@ -31,12 +32,15 @@ private:
     void *_forkSystemServerPost;
     void *_specializeAppProcessPre;
     void *_specializeAppProcessPost;
+    std::unique_ptr<int> _allowUnload;
 
 public:
-    explicit RiruModule(const char *name, uint32_t token = 0) : name(name), token(token ? token : (uintptr_t) name) {
-        funcs = new std::map<std::string, void *>();
+    explicit RiruModule(const char *id, const char *path, const char *magisk_module_path, uint32_t token = 0, std::unique_ptr<int> allowUnload = nullptr) :
+            id(id), path(path), magisk_module_path(magisk_module_path), token(token ? token : (uintptr_t) id) {
+
         apiVersion = 0;
         handle = nullptr;
+        _allowUnload = std::move(allowUnload);
         _onModuleLoaded = nullptr;
         _shouldSkipUid = nullptr;
         _forkAndSpecializePre = nullptr;
@@ -47,7 +51,7 @@ public:
         _specializeAppProcessPost = nullptr;
     }
 
-    void info(RiruModuleInfoV9 *info) {
+    void info(RiruModuleInfo *info) {
         supportHide = info->supportHide;
         version = info->version;
         versionName = strdup(info->versionName ? info->versionName : "(null)");
@@ -59,6 +63,26 @@ public:
         _forkSystemServerPost = (void *) info->forkSystemServerPost;
         _specializeAppProcessPre = (void *) info->specializeAppProcessPre;
         _specializeAppProcessPost = (void *) info->specializeAppProcessPost;
+    }
+
+    void unload() {
+        if (!handle) return;
+
+        if (dlclose(handle) == 0) {
+            handle = nullptr;
+        }
+    }
+
+    bool isLoaded() {
+        return handle != nullptr;
+    }
+
+    bool allowUnload() {
+        return _allowUnload && *_allowUnload != 0;
+    }
+
+    void resetAllowUnload() {
+        if (_allowUnload) *_allowUnload = 0;
     }
 
     bool hasOnModuleLoaded() {
@@ -94,16 +118,11 @@ public:
     }
 
     void onModuleLoaded() {
-        if (apiVersion == 9 || apiVersion == 10) {
-            ((onModuleLoaded_v9 *) _onModuleLoaded)();
-        }
+        ((onModuleLoaded_v9 *) _onModuleLoaded)();
     }
 
     bool shouldSkipUid(int uid) {
-        if (apiVersion == 9 || apiVersion == 10) {
-            return ((shouldSkipUid_v9 *) _shouldSkipUid)(uid);
-        }
-        return false;
+        return ((shouldSkipUid_v9 *) _shouldSkipUid)(uid);
     }
 
     void forkAndSpecializePre(
@@ -113,38 +132,30 @@ public:
             jstring *instructionSet, jstring *appDataDir, jboolean *isTopApp, jobjectArray *pkgDataInfoList,
             jobjectArray *whitelistedDataInfoList, jboolean *bindMountAppDataDirs, jboolean *bindMountAppStorageDirs) {
 
-        if (apiVersion == 9 || apiVersion == 10) {
-            ((nativeForkAndSpecializePre_v9 *) _forkAndSpecializePre)(
-                    env, cls, uid, gid, gids, runtimeFlags, rlimits, mountExternal,
-                    seInfo, niceName, fdsToClose, fdsToIgnore, is_child_zygote,
-                    instructionSet, appDataDir, isTopApp, pkgDataInfoList, whitelistedDataInfoList,
-                    bindMountAppDataDirs, bindMountAppStorageDirs);
-        }
+        ((nativeForkAndSpecializePre_v9 *) _forkAndSpecializePre)(
+                env, cls, uid, gid, gids, runtimeFlags, rlimits, mountExternal,
+                seInfo, niceName, fdsToClose, fdsToIgnore, is_child_zygote,
+                instructionSet, appDataDir, isTopApp, pkgDataInfoList, whitelistedDataInfoList,
+                bindMountAppDataDirs, bindMountAppStorageDirs);
     }
 
     void forkAndSpecializePost(JNIEnv *env, jclass cls, jint res) {
-        if (apiVersion == 9 || apiVersion == 10) {
-            ((nativeForkAndSpecializePost_v9 *) _forkAndSpecializePost)(
-                    env, cls, res);
-        }
+        ((nativeForkAndSpecializePost_v9 *) _forkAndSpecializePost)(
+                env, cls, res);
     }
 
     void forkSystemServerPre(
             JNIEnv *env, jclass cls, uid_t *uid, gid_t *gid, jintArray *gids, jint *runtimeFlags,
             jobjectArray *rlimits, jlong *permittedCapabilities, jlong *effectiveCapabilities) {
 
-        if (apiVersion == 9 || apiVersion == 10) {
-            ((nativeForkSystemServerPre_v9 *) _forkSystemServerPre)(
-                    env, cls, uid, gid, gids, runtimeFlags, rlimits, permittedCapabilities,
-                    effectiveCapabilities);
-        }
+        ((nativeForkSystemServerPre_v9 *) _forkSystemServerPre)(
+                env, cls, uid, gid, gids, runtimeFlags, rlimits, permittedCapabilities,
+                effectiveCapabilities);
     }
 
     void forkSystemServerPost(JNIEnv *env, jclass cls, jint res) {
-        if (apiVersion == 9 || apiVersion == 10) {
-            ((nativeForkSystemServerPost_v9 *) _forkSystemServerPost)(
-                    env, cls, res);
-        }
+        ((nativeForkSystemServerPost_v9 *) _forkSystemServerPost)(
+                env, cls, res);
     }
 
     void specializeAppProcessPre(
@@ -154,24 +165,21 @@ public:
             jboolean *isTopApp, jobjectArray *pkgDataInfoList, jobjectArray *whitelistedDataInfoList,
             jboolean *bindMountAppDataDirs, jboolean *bindMountAppStorageDirs) {
 
-        if (apiVersion == 9 || apiVersion == 10) {
-            ((nativeSpecializeAppProcessPre_v9 *) _specializeAppProcessPre)(
-                    env, cls, uid, gid, gids, runtimeFlags, rlimits, mountExternal, seInfo,
-                    niceName, startChildZygote, instructionSet, appDataDir, isTopApp,
-                    pkgDataInfoList, whitelistedDataInfoList, bindMountAppDataDirs, bindMountAppStorageDirs);
-        }
+        ((nativeSpecializeAppProcessPre_v9 *) _specializeAppProcessPre)(
+                env, cls, uid, gid, gids, runtimeFlags, rlimits, mountExternal, seInfo,
+                niceName, startChildZygote, instructionSet, appDataDir, isTopApp,
+                pkgDataInfoList, whitelistedDataInfoList, bindMountAppDataDirs, bindMountAppStorageDirs);
     }
 
     void specializeAppProcessPost(JNIEnv *env, jclass cls) {
-        if (apiVersion == 9 || apiVersion == 10) {
-            ((nativeSpecializeAppProcessPost_v9 *) _specializeAppProcessPost)(
-                    env, cls);
-        }
+        ((nativeSpecializeAppProcessPost_v9 *) _specializeAppProcessPost)(
+                env, cls);
     }
 };
 
-std::vector<RiruModule *> *get_modules();
+namespace Modules {
 
-void load_modules();
+    std::vector<RiruModule *> &Get();
 
-bool is_hide_enabled();
+    void Load();
+}

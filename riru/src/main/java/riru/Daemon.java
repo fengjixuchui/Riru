@@ -1,6 +1,5 @@
 package riru;
 
-import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -9,10 +8,6 @@ import android.os.SystemProperties;
 import android.util.Log;
 
 import androidx.annotation.Keep;
-
-import java.io.File;
-
-import riru.core.BuildConfig;
 
 /**
  * A "daemon" that controls native bridge prop and "rirud" socket.
@@ -27,13 +22,11 @@ public class Daemon {
     private final Handler handler;
     private final String name;
     private final String originalNativeBridge;
-    private final boolean enableHide;
 
-    public Daemon(String name, String originalNativeBridge, boolean enableHide) {
+    public Daemon(String name, String originalNativeBridge) {
         this.handler = new Handler(Looper.myLooper());
         this.name = name;
         this.originalNativeBridge = originalNativeBridge;
-        this.enableHide = enableHide;
 
         handler.post(() -> startWait(true, true));
     }
@@ -51,7 +44,7 @@ public class Daemon {
             if (allowRestart) {
                 handler.post(() -> {
                     Log.w(TAG, "Restarting zygote...");
-                    if (Build.SUPPORTED_64_BIT_ABIS.length > 0 && Build.SUPPORTED_32_BIT_ABIS.length > 0) {
+                    if (DaemonUtils.has64Bit() && DaemonUtils.has32Bit()) {
                         // Only devices with both 32-bit and 64-bit support have zygote_secondary
                         SystemProperties.set("ctl.restart", "zygote_secondary");
                     } else {
@@ -63,12 +56,6 @@ public class Daemon {
             return;
         }
 
-        if (!enableHide) {
-            Log.i(TAG, "Exit because Riru is loaded and hide is disabled.");
-            System.exit(0);
-            return;
-        }
-
         Log.i(TAG, "Riru loaded, reset native bridge to " + originalNativeBridge + "...");
         DaemonUtils.resetNativeBridgeProp(originalNativeBridge);
 
@@ -77,7 +64,7 @@ public class Daemon {
 
         try {
             binder.linkToDeath(() -> {
-                Log.i(TAG, "Zygote is probably dead, delete existing /dev/riru_ folders...");
+                Log.i(TAG, "Zygote is probably dead, delete existing /dev/riru folders...");
                 DaemonUtils.deleteDevFolder();
 
                 Log.i(TAG, "Zygote is probably dead, reset native bridge to " + RIRU_LOADER + "...");
@@ -95,9 +82,6 @@ public class Daemon {
 
     @Keep
     public static void main(String[] args) {
-        boolean enableHide = new File("/data/adb/riru/enable_hide").exists() || BuildConfig.DEBUG;
-        Log.i(TAG, enableHide ? "Hide is enabled" : "Hide is not enabled.");
-
         String originalNativeBridge = DaemonUtils.readOriginalNativeBridge();
         Log.i(TAG, "Original native bridge is " + originalNativeBridge);
 
@@ -106,7 +90,7 @@ public class Daemon {
         }
 
         Looper.prepare();
-        new Daemon(SERVICE_FOR_TEST, originalNativeBridge, enableHide);
+        new Daemon(SERVICE_FOR_TEST, originalNativeBridge);
         Looper.loop();
     }
 }

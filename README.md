@@ -26,16 +26,11 @@ Android 6.0+ devices rooted with [Magisk](https://github.com/topjohnwu/Magisk)
 
 * "Riru" app (show Riru status)
 
-  [Download](https://github.com/RikkaApps/Riru/releases/download/v23.0/riru-v23.0.r235.d313e94.apk)
+  [Download](https://github.com/RikkaApps/Riru/releases/download/v23.6/riru-v23.6.r279.f990471.apk)
 
 **If you are using other modules that change `ro.dalvik.vm.native.bridge`, Riru will not work.** (Riru will automatically set it back)
 
 A typical example is, some "optimize" modules change this property. Since changing this property is meaningless for "optimization", their quality is very questionable. In fact, changing properties for optimization is a joke.
-
-### Config
-
-* When the file `/data/adb/riru/disable` exists, Riru will do nothing
-* When the file `/data/adb/riru/enable_hide` exists, the hidden mechanism will be enabled (also requires the support of the modules)
 
 ## How Riru works?
 
@@ -57,7 +52,23 @@ From v22.0, Riru provides a hidden mechanism (idea from [Haruue Icymoon](https:/
 
 ## Build
 
-Run gradle task `:riru:assembleRelease` task from Android Studio or the terminal, zip will be saved to `out`.
+Gradle tasks:
+
+* `:riru:assembleDebug/Release`
+   
+   Generate Magisk module zip to `out`.
+
+* `:riru:pushDebug/Release`
+   
+   Push the zip with adb to `/data/local/tmp`.
+
+* `:riru:flashDebug/Release`
+   
+   Flash the zip with `adb shell su -c magisk --install-module`.
+
+* `:riru:flashAndRebootDebug/Release`
+
+   Flash the zip and reboot the device.
 
 ## Module template
 

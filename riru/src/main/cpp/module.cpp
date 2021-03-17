@@ -2,6 +2,8 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
+#include <android_prop.h>
+#include <memory>
 #include "module.h"
 #include "wrap.h"
 #include "logging.h"
@@ -10,66 +12,202 @@
 #include "status.h"
 #include "hide_utils.h"
 #include "status_generated.h"
+#include "magisk.h"
+#include "dl.h"
 
-static bool hide_enabled;
+using namespace std;
 
-bool is_hide_enabled() {
-    return hide_enabled;
-}
-
-std::vector<RiruModule *> *get_modules() {
-    static auto *modules = new std::vector<RiruModule *>({new RiruModule(strdup(MODULE_NAME_CORE))});
+std::vector<RiruModule *> &Modules::Get() {
+    static auto modules = std::vector<RiruModule *>({new RiruModule(strdup(MODULE_NAME_CORE), "", "")});
     return modules;
 }
 
-static RiruModuleInfoV9 *init_module_v9(uint32_t token, RiruInit_t *init) {
-    auto riru = new RiruApiV9();
-    riru->token = token;
-    riru->getFunc = api::getFunc;
-    riru->setFunc = api::setFunc;
-    riru->getJNINativeMethodFunc = api::getNativeMethodFunc;
-    riru->setJNINativeMethodFunc = api::setNativeMethodFunc;
-    riru->getOriginalJNINativeMethodFunc = api::getOriginalNativeMethod;
-    riru->getGlobalValue = api::getGlobalValue;
-    riru->putGlobalValue = api::putGlobalValue;
-
-    return (RiruModuleInfoV9 *) init(riru);
-}
-
-static void cleanup(void *handle, const char *path) {
+static void Cleanup(void *handle) {
     if (dlclose(handle) != 0) {
         LOGE("dlclose failed: %s", dlerror());
         return;
     }
+}
 
-    procmaps_iterator *maps = pmparser_parse(-1);
-    if (maps == nullptr) {
-        LOGE("cannot parse the memory map");
+typedef struct {
+    uint32_t token;
+    void *getFunc;
+    void *getJNINativeMethodFunc;
+    void *setFunc;
+    void *setJNINativeMethodFunc;
+    void *getOriginalJNINativeMethodFunc;
+    void *getGlobalValue;
+    void *putGlobalValue;
+} LegacyApiStub;
+
+namespace LegacyApiStubs {
+
+    const JNINativeMethod *getOriginalNativeMethod(
+            const char *className, const char *name, const char *signature) {
+        return nullptr;
+    }
+
+    void *getFunc(uint32_t token, const char *name) {
+        return nullptr;
+    }
+
+    void *getNativeMethodFunc(
+            uint32_t token, const char *className, const char *name, const char *signature) {
+        return nullptr;
+    }
+
+    void setFunc(uint32_t token, const char *name, void *func) {
+    }
+
+    void setNativeMethodFunc(
+            uint32_t token, const char *className, const char *name, const char *signature, void *func) {
+    }
+
+    void putGlobalValue(const char *key, void *value) {
+    }
+
+    void *getGlobalValue(const char *key) {
+        return nullptr;
+    }
+}
+
+static void LoadModule(const char *id, const char *path, const char *magisk_module_path) {
+    char *name = strdup(id);
+
+    if (access(path, F_OK) != 0) {
+        PLOGE("access %s", path);
         return;
     }
 
-    procmaps_struct *maps_tmp;
-    while ((maps_tmp = pmparser_next(maps)) != nullptr) {
-        if (strcmp(maps_tmp->pathname, path) != 0) continue;
-
-        auto start = (uintptr_t) maps_tmp->addr_start;
-        auto end = (uintptr_t) maps_tmp->addr_end;
-        auto size = end - start;
-        LOGD("%" PRIxPTR"-%" PRIxPTR" %s %ld %s", start, end, maps_tmp->perm, maps_tmp->offset, maps_tmp->pathname);
-        munmap((void *) start, size);
+    auto handle = dlopen_ext(path, 0);
+    if (!handle) {
+        LOGE("dlopen %s failed: %s", path, dlerror());
+        return;
     }
-    pmparser_free(maps);
+
+    auto init = (RiruInit_t *) dlsym(handle, "init");
+    if (!init) {
+        LOGW("%s does not export init", path);
+        Cleanup(handle);
+        return;
+    }
+
+    auto token = (uintptr_t) name;
+    auto legacyApiStub = new LegacyApiStub{
+            .token = (uint32_t) token,
+            .getFunc = (void *) LegacyApiStubs::getFunc,
+            .getJNINativeMethodFunc = (void *) LegacyApiStubs::getNativeMethodFunc,
+            .setFunc = (void *) LegacyApiStubs::setFunc,
+            .setJNINativeMethodFunc = (void *) LegacyApiStubs::setNativeMethodFunc,
+            .getOriginalJNINativeMethodFunc = (void *) LegacyApiStubs::getOriginalNativeMethod,
+            .getGlobalValue = (void *) LegacyApiStubs::getGlobalValue,
+            .putGlobalValue = (void *) LegacyApiStubs::putGlobalValue
+    };
+
+    auto allowUnload = std::make_unique<int>(0);
+    auto riru = new Riru{
+            .riruApiVersion = RIRU_API_VERSION,
+            .unused = (void *) legacyApiStub,
+            .magiskModulePath = magisk_module_path,
+            .allowUnload = allowUnload.get()
+    };
+
+    auto moduleInfo = init(riru);
+    if (moduleInfo == nullptr) {
+        LOGE("%s requires higher Riru version (or its broken)", path);
+        Cleanup(handle);
+        return;
+    }
+
+    auto apiVersion = moduleInfo->moduleApiVersion;
+    if (apiVersion < RIRU_MIN_API_VERSION || apiVersion > RIRU_API_VERSION) {
+        LOGW("unsupported API %s: %d", name, apiVersion);
+        Cleanup(handle);
+        return;
+    }
+
+    auto module = new RiruModule(name, strdup(path), strdup(magisk_module_path), token, std::move(allowUnload));
+    module->handle = handle;
+    module->apiVersion = apiVersion;
+
+    if (apiVersion >= 24) {
+        module->info(&moduleInfo->moduleInfo);
+    } else {
+        moduleInfo = init((Riru *) legacyApiStub);
+        if (moduleInfo == nullptr) {
+            LOGE("%s returns null on step 2", path);
+            Cleanup(handle);
+            return;
+        }
+        module->info((RiruModuleInfo *) moduleInfo);
+        init(nullptr);
+    }
+
+    Modules::Get().push_back(module);
+
+    LOGI("module loaded: %s (api %d)", module->id, module->apiVersion);
 }
 
-void load_modules() {
+void Modules::Load() {
     uint8_t *buffer;
     uint32_t buffer_size;
 
-    char path[PATH_MAX];
-    void *handle;
-    const int riruApiVersion = RIRU_API_VERSION;
+    Magisk::ForEachModule([](const char *path) {
+        auto magisk_module_name = basename(path);
+        char buf[PATH_MAX];
+        DIR *dir;
+        struct dirent *entry;
 
-    Status::Read(buffer, buffer_size);
+        strcpy(buf, path);
+        strcat(buf, "/riru/lib");
+#ifdef __LP64__
+        strcat(buf, "64");
+#endif
+
+        if (access(buf, F_OK) == -1) {
+            return;
+        }
+
+        LOGI("Magisk module %s is a Riru module", magisk_module_name);
+
+        if (!(dir = opendir(buf))) return;
+
+        strcat(buf, "/");
+
+        while ((entry = readdir(dir))) {
+            if (entry->d_type != DT_REG) continue;
+
+            auto end = buf + strlen(buf);
+            strcat(buf, entry->d_name);
+
+            char id[PATH_MAX]{0};
+            strcpy(id, magisk_module_name);
+            strcat(id, "@");
+
+            // remove "lib" or "libriru_"
+            if (strncmp(entry->d_name, "libriru_", 8) == 0) {
+                strcat(id, entry->d_name + 8);
+            } else if (strncmp(entry->d_name, "lib", 3) == 0) {
+                strcat(id, entry->d_name + 3);
+            } else {
+                strcat(id, entry->d_name);
+            }
+
+            // remove ".so"
+            id[strlen(id) - 3] = '\0';
+
+            LoadModule(id, buf, path);
+
+            *end = '\0';
+        }
+
+        closedir(dir);
+    });
+
+    if (!Status::ReadModules(buffer, buffer_size)) {
+        return;
+    }
+
     auto status = Status::GetFbStatus(buffer);
 
     if (!status->core()) {
@@ -81,89 +219,26 @@ void load_modules() {
         goto clean;
     }
 
-    hide_enabled = status->core()->hide();
-
     for (auto it : *status->modules()) {
+        char path[PATH_MAX];
         auto name = it->name()->c_str();
-        snprintf(path, PATH_MAX, MODULE_PATH_FMT, name);
+#ifdef __LP64__
+        snprintf(path, PATH_MAX, "/system/lib64/libriru_%s.so", name);
+#else
+        snprintf(path, PATH_MAX, "/system/lib/libriru_%s.so", name);
 
-        if (access(path, F_OK) != 0) {
-            PLOGE("access %s", path);
-            continue;
-        }
-
-        handle = dlopen(path, 0);
-        if (!handle) {
-            LOGE("dlopen %s failed: %s", path, dlerror());
-            continue;
-        }
-
-        auto init = (RiruInit_t *) dlsym(handle, "init");
-        if (!init) {
-            LOGW("%s does not export init", path);
-            cleanup(handle, path);
-            continue;
-        }
-
-        // 1. pass riru api version, return module's api version
-        auto apiVersion = (int *) init((void *) &riruApiVersion);
-        if (apiVersion == nullptr) {
-            LOGE("%s returns null on step 1", path);
-            cleanup(handle, path);
-            continue;
-        }
-
-        if (*apiVersion < RIRU_MIN_API_VERSION || *apiVersion > RIRU_API_VERSION) {
-            LOGW("unsupported API %s: %d", name, *apiVersion);
-            cleanup(handle, path);
-            continue;
-        }
-
-        // 2. create and pass Riru struct by module's api version
-        auto module = new RiruModule(strdup(name));
-        module->handle = handle;
-        module->apiVersion = *apiVersion;
-
-        if (*apiVersion == 10 || *apiVersion == 9) {
-            auto info = init_module_v9(module->token, init);
-            if (info == nullptr) {
-                LOGE("%s returns null on step 2", path);
-                cleanup(handle, path);
-                continue;
-            }
-            module->info(info);
-        }
-
-        // 3. let the module to do some cleanup jobs
-        init(nullptr);
-
-        get_modules()->push_back(module);
-
-        LOGI("module loaded: %s (api %d)", module->name, module->apiVersion);
+#endif
+        LoadModule(name, path, "");
     }
 
-    if (hide_enabled) {
-        LOGI("hide is enabled");
-        auto modules = get_modules();
-        auto names = (const char **) malloc(sizeof(char *) * modules->size());
-        int names_count = 0;
-        for (auto module : *get_modules()) {
-            if (strcmp(module->name, MODULE_NAME_CORE) == 0) continue;
-            if (!module->supportHide) {
-                LOGI("module %s does not support hide", module->name);
-                continue;
-            }
-            names[names_count] = module->name;
-            names_count += 1;
-        }
-        hide::hide_modules(names, names_count);
-    } else {
-        LOGI("hide is not enabled");
+    // On Android 10+, zygote has "execmem" permission, we can use "riru hide" here
+    if (AndroidProp::GetApiLevel() >= 29) {
+        Hide::HideFromMaps();
     }
 
-    for (auto module : *get_modules()) {
+    for (auto module : Modules::Get()) {
         if (module->hasOnModuleLoaded()) {
-            LOGV("%s: onModuleLoaded", module->name);
+            LOGV("%s: onModuleLoaded", module->id);
 
             module->onModuleLoaded();
         }

@@ -12,21 +12,66 @@ If you are use other modules that changes `ro.dalvik.vm.native.bridge`, Riru wil
 
 A typical example is, some "optimize" modules changes this property. Since changing this property is meaningless for "optimization", their quality is very questionable. In fact, changing properties for optimization is a joke.
 
-### Config
+### Install from recovery is NOT supported
 
-* When the file `/data/adb/riru/disable` exists, Riru will do nothing
-* When the file `/data/adb/riru/enable_hide` exists, the hide mechanism will be enabled
+Many TWRP has broken implementations, which will finally cause Riru and Riru modules "installed" but not working.
 
 ## Changelog
+
+### v25.0.0 (2021-03-16)
+
+- Support unload self and modules, leaving no trace for unrelated processes (requires module changes)
+- Support remove self and modules from `dl_iterate_phdr` (requires Android 8.0+)
+- Use a new way to bypass `dlopen` path limitation
+
+### v24.1.2 (2021-03-13)
+
+- Don't attempt to run hide for `webview_zygote` on pre-29
+
+### v24.1.1 (2021-03-13)
+
+- Hide is enabled by default and cannot be disabled
+- Hide works on pre-29 without extra SELinux rule
+
+Since v24 starts to load so files directly from the Magisk path (`/sbin` or `/dev`), it's highly possible to trigger anti-cheat from games, so hide is a must.
+
+### v24.1.0 (2021-03-12)
+
+- Hide names from `dl_iterate_phdr`
+
+### v24.0.1 (2021-03-11)
+
+- Fix pre-v24 modules installation
+
+### v24.0.0 (2021-03-11)
+
+- Unify the Riru API version and Riru version, now the API version is 24
+- For modules that have adapted Riru API 24, lib files are loaded from the Magisk path directly, they don't need to be mounted to `/system` anymore
+- `/data/adb/riru/modules` is no longer used, you can remove it when all modules are update to Riru API 24
+- Use git commit count as version code
+- Remove fallback SELinux rules, if rirud is not started, it's highly possible that the booting processes of Magisk is totally broken on your device
+
+### v23.9 (59) (2021-03-06)
+
+- Fix crash when JVM reuses reference index on devices with `libnativehelper_lazy` (`libnativehelper_lazy` may come in Android 12 DP2 or later) (by LSPosed devs)
+
+### v23.8 (58) (2021-03-05)
+
+- Fix a problem that only exists on 32-bit devices
+
+### v23.7 (57) (2021-03-01)
+
+- Prepare for changes brought by `libnativehelper_lazy` (these changes may come in Android 12 DP2 or later)
+- Fix symbols are incorrectly exported
+
+### v23.6 (56) (2021-02-21)
+
+- Continue reduce the file size
+- Works on devices that have dropped 32-bit support (Android 12 emulator or devices in the future)
 
 ### v23.5 (55) (2021-02-11)
 
 - Reduce the file size
-- Prevent to be installed from recovery
-
-  Riru requires files in `/data/adb/riru` folder, this folder is created during installation.
-
-  Many TWRP has broken implementations, causing the folder cannot be created, this will finally cause Riru and Riru modules not working.
 
 ### v23.4 (54) (2021-01-23)
 

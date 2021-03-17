@@ -1,16 +1,18 @@
+import org.apache.tools.ant.filters.FixCrLfFilter
+
 apply plugin: 'idea'
 
 idea.module {
     excludeDirs += file('out')
-    excludeDirs += file('aar')
     resourceDirs += file('template')
+    excludeDirs += file('template/aar')
     resourceDirs += file('scripts')
     resourceDirs += file('docs')
 }
 
 buildscript {
-    ext.kotlin_version = '1.4.21'
-    ext.kotlin_coroutines_version = '1.4.2'
+    ext.kotlin_version = '1.4.31'
+    ext.kotlin_coroutines_version = '1.4.3'
 
     repositories {
         google()
@@ -38,6 +40,96 @@ ext {
     minSdkVersion = 23
     targetSdkVersion = 30
 
-    riruApiVersion = 10
+    riruApiVersion = 25
     riruMinApiVersion = 9
+
+    gitCommitId = 'git rev-parse --short HEAD'.execute([], project.rootDir).text.trim()
+    gitCommitCount = Integer.parseInt('git rev-list --count HEAD'.execute([], project.rootDir).text.trim())
+
+    versionNameMinor = 0
+    versionNamePatch = 0
+}
+
+def aarVersion = "${riruApiVersion}.0.0"
+def aarDir = "out/aar/dev/rikka/ndk/riru/${aarVersion}"
+
+task generateLibraryAar(type: Zip) {
+    copy {
+        from 'riru/src/main/cpp/include_riru/riru.h'
+        into 'template/aar/riru.aar/prefab/modules/riru/include'
+    }
+
+    from 'template/aar/riru.aar'
+    archiveName "riru-${aarVersion}.aar"
+    destinationDir file(aarDir)
+}
+
+task signLibraryAar(type: Exec) {
+    commandLine "gpg",
+            "--armor",
+            "--detach-sign",
+            "--passphrase=${findProperty("signing.password")}",
+            "--batch",
+            "--yes",
+            "riru-${aarVersion}.aar"
+    workingDir aarDir
+}
+
+task generateLibraryPom(type: Copy) {
+    from 'template/aar/riru.pom'
+    into file(aarDir)
+    filter { line -> line.replaceAll('%%%VERSION%%%', "$aarVersion") }
+    filter(FixCrLfFilter.class,
+            eol: FixCrLfFilter.CrLf.newInstance("lf"))
+    rename { "riru-${aarVersion}.pom" }
+}
+
+task signLibraryPom(type: Exec) {
+    commandLine "gpg",
+            "--armor",
+            "--detach-sign",
+            "--passphrase=${findProperty("signing.password")}",
+            "--batch",
+            "--yes",
+            "riru-${aarVersion}.pom"
+    workingDir aarDir
+}
+
+task generateLibrarySourceJar(type: Zip) {
+    from 'template/aar/riru-sources.jar'
+    archiveName "riru-${aarVersion}-sources.jar"
+    destinationDir file(aarDir)
+}
+
+task signLibrarySourceJar(type: Exec) {
+    commandLine "gpg",
+            "--armor",
+            "--detach-sign",
+            "--passphrase=${findProperty("signing.password")}",
+            "--batch",
+            "--yes",
+            "riru-${aarVersion}-sources.jar"
+    workingDir aarDir
+}
+
+task generateLibraryJavaDocJar(type: Zip) {
+    from 'template/aar/riru-javadoc.jar'
+    archiveName "riru-${aarVersion}-javadoc.jar"
+    destinationDir file(aarDir)
+}
+
+task signLibraryJavaDocJar(type: Exec) {
+    commandLine "gpg",
+            "--armor",
+            "--detach-sign",
+            "--passphrase=${findProperty("signing.password")}",
+            "--batch",
+            "--yes",
+            "riru-${aarVersion}-javadoc.jar"
+    workingDir aarDir
+}
+
+task generateLibrary(type: GradleBuild) {
+    tasks = [':generateLibraryAar', ':generateLibraryPom', ':generateLibrarySourceJar', ':generateLibraryJavaDocJar',
+             ':signLibraryAar', ':signLibraryPom', ':signLibrarySourceJar', ':signLibraryJavaDocJar']
 }

@@ -16,11 +16,14 @@
 #include <cinttypes>
 #include <wait.h>
 #include <dirent.h>
+#include <sys/system_properties.h>
 #include "status.h"
 #include "status_generated.h"
 #include "setproctitle.h"
 
 #define WORKER_PROCESS "rirud_worker"
+
+static char original_native_bridge[PROP_VALUE_MAX] = {'0', '\0'};
 
 static int server_socket_fd = -1;
 static std::vector<pid_t> child_pids;
@@ -42,17 +45,14 @@ static bool handle_read_status(int sockfd) {
 }
 
 static bool handle_read_original_native_bridge(int sockfd) {
-    char buf[PATH_MAX]{0};
-    int32_t size = 0;
-    int fd = open(CONFIG_DIR "/native_bridge", O_RDONLY);
-    if (fd == -1) {
-        PLOGE("access " CONFIG_DIR "/native_bridge");
-    } else {
-        size = read(fd, buf, PATH_MAX);
-        close(fd);
-    }
+    int32_t size = strlen(original_native_bridge);
+    return write_full(sockfd, &size, sizeof(size)) == 0 && (size <= 0 || write_full(sockfd, original_native_bridge, size) == 0);
+}
 
-    return write_full(sockfd, &size, sizeof(size)) == 0 && (size <= 0 || write_full(sockfd, buf, size) == 0);
+static bool handle_read_magisk_tmpfs_path(int sockfd) {
+    auto path = Status::GetMagiskTmpfsPath();
+    int32_t size = strlen(path);
+    return write_full(sockfd, &size, sizeof(size)) == 0 && (size <= 0 || write_full(sockfd, path, size) == 0);
 }
 
 static bool handle_write_status(int sockfd) {
@@ -256,6 +256,11 @@ static void handle_socket(int sockfd, uint32_t action) {
             handle_read_original_native_bridge(sockfd);
             break;
         }
+        case Status::ACTION_READ_MAGISK_TMPFS_PATH: {
+            LOGI("action: read Magisk tmpfs path");
+            handle_read_magisk_tmpfs_path(sockfd);
+            break;
+        }
         case Status::ACTION_WRITE_STATUS: {
             LOGI("action: write status");
             handle_write_status(sockfd);
@@ -433,16 +438,20 @@ static void sig_handler(int sig) {
 }
 
 int main(int argc, char **argv) {
-    daemon(0, 0);
+    if (__system_property_get("ro.dalvik.vm.native.bridge", original_native_bridge) > 0) {
+        LOGI("backup original native bridge %s", original_native_bridge);
+    } else {
+        PLOGE("getprop ro.dalvik.vm.native.bridge");
+    }
 
-    switch (fork()) {
-        case 0:
-            daemon_main();
+    LOGI("Magisk version is %d", Status::GetMagiskVersion());
+    LOGI("Magisk tmpfs path is %s", Status::GetMagiskTmpfsPath());
+
+    switch (daemon(0, 0)) {
         case -1:
-            PLOGE("fork");
+            PLOGE("daemon");
             return -1;
         default:
-            break;
+            daemon_main();
     }
-    return 0;
 }
