@@ -4,35 +4,49 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.RemoteException;
-import android.os.SystemProperties;
 import android.util.Log;
 
-import androidx.annotation.Keep;
+public class Daemon implements IBinder.DeathRecipient {
 
-/**
- * A "daemon" that controls native bridge prop and "rirud" socket.
- */
-public class Daemon {
-
-    public static final String TAG = "rirud_java";
+    public static final String TAG = "RiruDaemon";
 
     private static final String SERVICE_FOR_TEST = "activity";
     private static final String RIRU_LOADER = "libriruloader.so";
 
     private final Handler handler;
     private final String name;
-    private final String originalNativeBridge;
+    private final DaemonSocketServerThread serverThread;
 
-    public Daemon(String name, String originalNativeBridge) {
+    private IBinder systemServerBinder;
+
+    public Daemon() {
         this.handler = new Handler(Looper.myLooper());
-        this.name = name;
-        this.originalNativeBridge = originalNativeBridge;
+        this.serverThread = new DaemonSocketServerThread();
+        this.name = SERVICE_FOR_TEST;
 
+        serverThread.start();
         handler.post(() -> startWait(true, true));
     }
 
+    @Override
+    public void binderDied() {
+        systemServerBinder.unlinkToDeath(this, 0);
+        systemServerBinder = null;
+
+        Log.i(TAG, "Zygote is probably dead, restart rirud socket...");
+        serverThread.restartServer();
+
+        Log.i(TAG, "Zygote is probably dead, reset native bridge to " + RIRU_LOADER + "...");
+        DaemonUtils.resetNativeBridgeProp(RIRU_LOADER);
+
+        Log.i(TAG, "Zygote is probably dead, delete existing /dev/riru folders...");
+        DaemonUtils.deleteDevFolder();
+
+        handler.post(() -> startWait(true, false));
+    }
+
     private void startWait(boolean allowRestart, boolean isFirst) {
-        IBinder binder = DaemonUtils.waitForSystemService(name);
+        systemServerBinder = DaemonUtils.waitForSystemService(name);
 
         if (!DaemonUtils.isRiruLoaded()) {
             Log.w(TAG, "Riru is not loaded.");
@@ -46,9 +60,9 @@ public class Daemon {
                     Log.w(TAG, "Restarting zygote...");
                     if (DaemonUtils.has64Bit() && DaemonUtils.has32Bit()) {
                         // Only devices with both 32-bit and 64-bit support have zygote_secondary
-                        SystemProperties.set("ctl.restart", "zygote_secondary");
+                        DaemonUtils.resetProperty("ctl.restart", "zygote_secondary");
                     } else {
-                        SystemProperties.set("ctl.restart", "zygote");
+                        DaemonUtils.resetProperty("ctl.restart", "zygote");
                     }
                     startWait(false, false);
                 });
@@ -56,41 +70,42 @@ public class Daemon {
             return;
         }
 
-        Log.i(TAG, "Riru loaded, reset native bridge to " + originalNativeBridge + "...");
-        DaemonUtils.resetNativeBridgeProp(originalNativeBridge);
+        Log.i(TAG, "Riru loaded, reset native bridge to " + DaemonUtils.getOriginalNativeBridge() + "...");
+        DaemonUtils.resetNativeBridgeProp(DaemonUtils.getOriginalNativeBridge());
 
         Log.i(TAG, "Riru loaded, stop rirud socket...");
-        DaemonUtils.stopSocket(DaemonUtils.findNativeDaemonPid());
+        DaemonUtils.writeStatus("Riru is loaded normally");
+        serverThread.stopServer();
 
         try {
-            binder.linkToDeath(() -> {
-                Log.i(TAG, "Zygote is probably dead, delete existing /dev/riru folders...");
-                DaemonUtils.deleteDevFolder();
-
-                Log.i(TAG, "Zygote is probably dead, reset native bridge to " + RIRU_LOADER + "...");
-                DaemonUtils.resetNativeBridgeProp(RIRU_LOADER);
-
-                Log.i(TAG, "Zygote is probably dead, restart rirud socket...");
-                DaemonUtils.startSocket(DaemonUtils.findNativeDaemonPid());
-
-                handler.post(() -> startWait(true, false));
-            }, 0);
+            systemServerBinder.linkToDeath(this, 0);
         } catch (RemoteException e) {
             Log.w(TAG, "linkToDeath", e);
         }
     }
 
-    @Keep
     public static void main(String[] args) {
-        String originalNativeBridge = DaemonUtils.readOriginalNativeBridge();
-        Log.i(TAG, "Original native bridge is " + originalNativeBridge);
+        DaemonUtils.init(args);
+        DaemonUtils.killParentProcess();
+        DaemonUtils.writeStatus("app_process launched");
+        int magiskVersionCode = DaemonUtils.getMagiskVersionCode();
+        String magiskTmpfsPath = DaemonUtils.getMagiskTmpfsPath();
 
-        if (originalNativeBridge == null) {
-            originalNativeBridge = "0";
+        Log.i(TAG, "Magisk version is " + magiskVersionCode);
+        Log.i(TAG, "Magisk tmpfs path is " + magiskTmpfsPath);
+        Log.i(TAG, "Original native bridge is " + DaemonUtils.getOriginalNativeBridge());
+        Log.i(TAG, "Dev random is " + DaemonUtils.getDevRandom());
+
+        if (DaemonUtils.hasSELinux()) {
+            if (DaemonUtils.setSocketCreateContext("u:r:zygote:s0")) {
+                Log.i(TAG, "Set socket context to u:r:zygote:s0");
+            } else {
+                Log.w(TAG, "Failed to set socket context");
+            }
         }
 
         Looper.prepare();
-        new Daemon(SERVICE_FOR_TEST, originalNativeBridge);
+        new Daemon();
         Looper.loop();
     }
 }

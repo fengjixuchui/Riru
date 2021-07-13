@@ -12,6 +12,7 @@
 #include "entry.h"
 #include <iostream>
 #include <elf_util.h>
+#include <set>
 
 namespace Hide {
     namespace {
@@ -79,86 +80,129 @@ namespace Hide {
         ProtectedDataGuard::FuncType ProtectedDataGuard::ctor = nullptr;
         ProtectedDataGuard::FuncType ProtectedDataGuard::dtor = nullptr;
 
-        void *(*solist_get_head)() = nullptr;
+        struct soinfo;
 
-        void *(*solist_get_somain)() = nullptr;
+        soinfo *solist = nullptr;
+        soinfo *sonext = nullptr;
+        soinfo *somain = nullptr;
 
-        bool (*solist_remove_soinfo)(void *) = nullptr;
+        template<typename T>
+        inline T *getStaticVariable(const SandHook::ElfImg &linker, std::string_view name) {
+            auto *addr = reinterpret_cast<T **>(linker.getSymbAddress(name.data()));
+            return addr == nullptr ? nullptr : *addr;
+        }
 
-        const char *(*soinfo_get_realpath)(void *) = nullptr;
-
-        uintptr_t *solist_head = nullptr;
-        uintptr_t somain = 0;
-        size_t solist_next_offset = 0;
-
-        bool init_solist() {
-            solist_head = static_cast<uintptr_t *>(solist_get_head());
-            somain = reinterpret_cast<uintptr_t>(solist_get_somain());
-            for (size_t i = 0; i < 1024 / sizeof(void *); i++) {
-                if (*(uintptr_t *) ((uintptr_t) solist_head + i * sizeof(void *)) == somain) {
-                    solist_next_offset = i * sizeof(void *);
-                    return true;
-                }
+        struct soinfo {
+            soinfo *next() {
+                return *(soinfo **) ((uintptr_t) this + solist_next_offset);
             }
-            return false;
+
+            void next(soinfo *si) {
+                *(soinfo **) ((uintptr_t) this + solist_next_offset) = si;
+            }
+
+            const char *get_realpath() {
+                return get_realpath_sym ? get_realpath_sym(this) : ((std::string *) (
+                        (uintptr_t) this + solist_realpath_offset))->c_str();
+
+            }
+
+            static bool setup(const SandHook::ElfImg &linker) {
+                get_realpath_sym = reinterpret_cast<decltype(get_realpath_sym)>(linker.getSymbAddress(
+                        "__dl__ZNK6soinfo12get_realpathEv"));
+                auto vsdo = getStaticVariable<soinfo>(linker, "__dl__ZL4vdso");
+                for (size_t i = 0; i < 1024 / sizeof(void *); i++) {
+                    auto *possible_next = *(void **) ((uintptr_t) solist + i * sizeof(void *));
+                    if (possible_next == somain || (vsdo != nullptr && possible_next == vsdo)) {
+                        solist_next_offset = i * sizeof(void *);
+                        return AndroidProp::GetApiLevel() < 26 || get_realpath_sym != nullptr;
+                    }
+                }
+                LOGW("failed to search next offset");
+                // shortcut
+                return AndroidProp::GetApiLevel() < 26 || get_realpath_sym != nullptr;
+            }
+
+#ifdef __LP64__
+            constexpr static size_t solist_realpath_offset = 0x1a8;
+            inline static size_t solist_next_offset = 0x30;
+#else
+            constexpr static size_t solist_realpath_offset = 0x174;
+            inline static size_t solist_next_offset = 0xa4;
+#endif
+
+            // since Android 8
+            inline static const char *(*get_realpath_sym)(soinfo *);
+        };
+
+        bool solist_remove_soinfo(soinfo *si) {
+            soinfo *prev = nullptr, *trav;
+            for (trav = solist; trav != nullptr; trav = trav->next()) {
+                if (trav == si) {
+                    break;
+                }
+                prev = trav;
+            }
+
+            if (trav == nullptr) {
+                // si was not in solist
+                LOGE("name \"%s\"@%p is not in solist!", si->get_realpath(), si);
+                return false;
+            }
+
+            // prev will never be null, because the first entry in solist is
+            // always the static libdl_info.
+            prev->next(si->next());
+            if (si == sonext) {
+                sonext = prev;
+            }
+
+            LOGD("removed soinfo: %s", si->get_realpath());
+
+            return true;
         }
 
         const auto initialized = []() {
             SandHook::ElfImg linker(GetLinkerPath());
             return ProtectedDataGuard::setup(linker) &&
-                   (solist_get_head = reinterpret_cast<decltype(solist_get_head)>(linker.getSymbAddress(
-                           "__dl__Z15solist_get_headv"))) != nullptr &&
-                   (solist_get_somain = reinterpret_cast<decltype(solist_get_somain)>(linker.getSymbAddress(
-                           "__dl__Z17solist_get_somainv"))) != nullptr &&
-                   (soinfo_get_realpath = reinterpret_cast<decltype(soinfo_get_realpath)>(linker.getSymbAddress(
-                           "__dl__ZNK6soinfo12get_realpathEv"))) != nullptr &&
-                   (solist_remove_soinfo = reinterpret_cast<decltype(solist_remove_soinfo)>(linker.getSymbAddress(
-                           "__dl__Z20solist_remove_soinfoP6soinfo"))) != nullptr && init_solist();
+                   (solist = getStaticVariable<soinfo>(linker, "__dl__ZL6solist")) != nullptr &&
+                   (sonext = getStaticVariable<soinfo>(linker, "__dl__ZL6sonext")) != nullptr &&
+                   (somain = getStaticVariable<soinfo>(linker, "__dl__ZL6somain")) != nullptr &&
+                   soinfo::setup(linker);
         }();
 
-        std::vector<void *> linker_get_solist() {
-            std::vector<void *> linker_solist{solist_head};
-
-            uintptr_t sonext = *(uintptr_t *) ((uintptr_t) solist_head + solist_next_offset);
-            while (sonext) {
-                linker_solist.push_back((void *) sonext);
-                sonext = *(uintptr_t *) ((uintptr_t) sonext + solist_next_offset);
+        std::vector<soinfo *> linker_get_solist() {
+            std::vector<soinfo *> linker_solist{};
+            for (auto *iter = solist; iter; iter = iter->next()) {
+                linker_solist.push_back(iter);
             }
-
             return linker_solist;
         }
 
-        void RemovePathsFromSolist(const std::vector<const char *> &names) {
+        void RemovePathsFromSolist(const std::set<std::string_view> &names) {
             if (!initialized) {
                 LOGW("not initialized");
                 return;
             }
             ProtectedDataGuard g;
-            auto list = linker_get_solist();
             for (const auto &soinfo : linker_get_solist()) {
-                const char *real_path = soinfo_get_realpath(soinfo);
-                if (real_path != nullptr) {
-                    for (const auto &path : names) {
-                        if (strcmp(path, real_path) == 0) {
-                            LOGD("remove soinfo %s", real_path);
-                            solist_remove_soinfo(soinfo);
-                            break;
-                        }
-                    }
+                const auto &real_path = soinfo->get_realpath();
+                if (real_path && names.count(real_path)) {
+                    solist_remove_soinfo(soinfo);
                 }
             }
         }
 
-        using riru_hide_t = int(const char *const *names, int names_count);
+        using riru_hide_t = int(const std::set<std::string_view> &names);
 
         void *riru_hide_handle;
         riru_hide_t *riru_hide_func;
 
-        void HidePathsFromMaps(const std::vector<const char *> &names) {
+        void HidePathsFromMaps(const std::set<std::string_view> &names) {
             if (!riru_hide_func) return;
 
             LOGD("do hide");
-            riru_hide_func(&names[0], names.size());
+            riru_hide_func(names);
 
             // cleanup riruhide.so
             LOGD("dlclose");
@@ -172,15 +216,15 @@ namespace Hide {
     void HideFromMaps() {
         auto self_path = Magisk::GetPathForSelfLib("libriru.so");
         auto modules = Modules::Get();
-        std::vector<const char *> names{};
+        std::set<std::string_view> names{};
         for (auto module : Modules::Get()) {
             if (strcmp(module->id, MODULE_NAME_CORE) == 0) {
-                names.push_back(self_path.c_str());
+                names.emplace(self_path);
             } else if (module->supportHide) {
                 if (!module->isLoaded()) {
                     LOGD("%s is unloaded", module->id);
                 } else {
-                    names.push_back(module->path);
+                    names.emplace(module->path);
                 }
             } else {
                 LOGD("module %s does not support hide", module->id);
@@ -189,56 +233,38 @@ namespace Hide {
         if (!names.empty()) Hide::HidePathsFromMaps(names);
     }
 
-    static void RemoveFromSoList(const std::vector<const char *> &names) {
+    static void RemoveFromSoList(const std::set<std::string_view> &names) {
         Hide::RemovePathsFromSolist(names);
-    }
-
-    static void HideFromSoList(const std::vector<const char *> &names) {
-        auto callback = [](struct dl_phdr_info *info, size_t size, void *data) {
-            auto names = *((std::vector<const char *> *) data);
-
-            for (const auto &path : names) {
-                if (strcmp(path, info->dlpi_name) == 0) {
-                    memset((void *) info->dlpi_name, 0, strlen(path));
-                    LOGD("hide %s from dl_iterate_phdr", path);
-                    break;
-                }
-            }
-            return 0;
-        };
-        dl_iterate_phdr(callback, (void *) &names);
     }
 
     void HideFromSoList() {
         auto self_path = Magisk::GetPathForSelfLib("libriru.so");
         auto modules = Modules::Get();
-        std::vector<const char *> names{};
+        std::set<std::string_view> names_to_remove{};
         for (auto module : Modules::Get()) {
             if (strcmp(module->id, MODULE_NAME_CORE) == 0) {
                 if (Entry::IsSelfUnloadAllowed()) {
                     LOGD("don't hide self since it will be unloaded");
                 } else {
-                    names.push_back(self_path.c_str());
+                    names_to_remove.emplace(self_path);
                 }
             } else if (module->supportHide) {
                 if (!module->isLoaded()) {
                     LOGD("%s is unloaded", module->id);
+                    continue;
+                }
+                if (module->apiVersion < 24) {
+                    LOGW("%s is too old to hide so", module->id);
                 } else {
-                    if (module->apiVersion <= 24) {
-                        LOGW("%s is too old to hide so", module->id);
-                    } else {
-                        names.push_back(module->path);
-                    }
+                    names_to_remove.emplace(module->path);
                 }
             } else {
                 LOGD("module %s does not support hide", module->id);
             }
         }
 
-        if (AndroidProp::GetApiLevel() >= 26) {
-            RemoveFromSoList(names);
-        } else {
-            HideFromSoList(names);
+        if (AndroidProp::GetApiLevel() >= 23 && !names_to_remove.empty()) {
+            RemoveFromSoList(names_to_remove);
         }
     }
 

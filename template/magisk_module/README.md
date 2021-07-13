@@ -18,6 +18,64 @@ Many TWRP has broken implementations, which will finally cause Riru and Riru mod
 
 ## Changelog
 
+### v25.4.4 (2021-05-07)
+
+- Fix in rare cases "soft boot" causes Riru not working
+- Fix keep `allow_install_app` flag (#225)
+
+### v25.4.3 (2021-05-05)
+
+- Exit `service.sh` script
+- Use uid 0 to install app
+
+### v25.4.2 (2021-04-15)
+
+- "Fix" system server injection does not work on Huawei devices by setting `ro.maple.enable` to `0`
+
+### v25.4.1 (2021-04-10)
+
+- Report incorrect SELinux rule [1]
+- Bundle app with the module (Create file `/data/adb/modules/riru-core/allow_install_app` to allow the module to install the app)
+
+[1] <https://github.com/RikkaApps/Riru/wiki/Explanation-about-incorrect-SELinux-rules-from-third-party-ROMs-cause-Riru-not-working>
+
+### v25.3.4 (2021-03-24)
+
+- Unload API 25+ modules in the app process if the module does not provide related functions
+- Don't use temporary buffers when parsing PID maps in pmparser ([#202](https://github.com/RikkaApps/Riru/pull/202))
+- Use self-compiled libcxx (https://github.com/topjohnwu/libcxx)
+
+### v25.3.3 (2021-03-22)
+
+- Fix crash on Android 8.0 again
+
+### Important changes from the last stable version (v23.9)
+    
+- Unify the Riru API version and Riru version, Riru 25 stands for API version 25
+- For modules that have adapted Riru API 24+, lib files are loaded from the Magisk path directly, they don't need to be mounted to `/system` anymore
+- Support unload self and modules, leaving no trace for unrelated processes (requires module changes)
+- Support remove self and modules from `dl_iterate_phdr`
+- `/data/adb/riru/modules` is no longer used, you can remove it when all modules are updated to Riru API 24+
+
+### v25.3.2 (2021-03-22)
+
+- New way to get realpath on old systems
+- Fix next offset on Android 9
+
+### v25.3.1 (2021-03-20)
+
+- Fix crash on Android 8
+
+### v25.3.0 (2021-03-20)
+
+- Support remove self and modules from `dl_iterate_phdr` now works for all Android versions
+
+### v25.2.0 (2021-03-17)
+
+- Always clear name from `dl_iterate_phdr`
+- Fix reset native bridge is broken since v24.0.0
+- Continue to reduce the file size (down to less than 200K now)
+
 ### v25.0.0 (2021-03-16)
 
 - Support unload self and modules, leaving no trace for unrelated processes (requires module changes)

@@ -1,7 +1,6 @@
 import org.apache.tools.ant.filters.FixCrLfFilter
-import org.gradle.internal.os.OperatingSystem
+import org.apache.tools.ant.filters.ReplaceTokens
 
-import java.nio.file.Files
 import java.security.MessageDigest
 
 plugins {
@@ -14,7 +13,7 @@ def versionCode = gitCommitCount
 
 def apiVersion = rootProject.ext.riruApiVersion
 def minApiVersion = rootProject.ext.riruMinApiVersion
-def moduleProp = [
+def moduleProps = [
         id         : "riru-core",
         name       : "Riru",
         version    : "$versionName",
@@ -35,10 +34,14 @@ android {
                 arguments "-DRIRU_VERSION_NAME:STRING=$versionNameShort",
                         "-DRIRU_VERSION_CODE:STRING=$versionCode",
                         "-DRIRU_API_VERSION=$apiVersion",
-                        "-DRIRU_MIN_API_VERSION=$minApiVersion"
+                        "-DRIRU_MIN_API_VERSION=$minApiVersion",
+                        "-DANDROID_STL=none"
             }
         }
         multiDexEnabled false
+        buildConfigField "int", "RIRU_API_VERSION", "$apiVersion"
+        buildConfigField "int", "RIRU_VERSION_CODE", "$versionCode"
+        buildConfigField "String", "RIRU_VERSION_NAME", "\"$versionNameShort\""
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
@@ -65,134 +68,108 @@ android {
 }
 
 repositories {
-    maven { url 'https://dl.bintray.com/rikkaw/Libraries' }
+    mavenLocal()
 }
 
 dependencies {
     implementation 'dev.rikka.ndk.thirdparty:xhook:1.2.0'
-    implementation 'rikka.ndk.thirdparty:flatbuffers:1.12.0'
-    implementation 'androidx.annotation:annotation:1.1.0'
+    implementation 'dev.rikka.ndk.thirdparty:cxx:1.1.0'
+    implementation 'dev.rikka.ndk.thirdparty:proc-maps-parser:1.0.0'
+    implementation 'dev.rikka.rikkax.io:little-endian-data-stream:1.0.1'
+    implementation 'androidx.annotation:annotation:1.2.0'
     compileOnly project(':stub')
 }
 
-def outDir = file("$rootDir/out")
-def magiskDir = file("$outDir/magisk_module")
-
-static def sha256sum(file) {
-    def md = MessageDigest.getInstance("SHA-256")
-    file.eachByte 4096, { bytes, size ->
-        md.update(bytes, 0, size);
+android.applicationVariants.all { variant ->
+    variant.outputs.all {
+        outputFileName = "${project.name}.apk"
     }
-    return md.digest().encodeHex()
 }
 
-android.applicationVariants.all { variant ->
-    def variantCapped = variant.name.capitalize()
-    def variantLowered = variant.name.toLowerCase()
+afterEvaluate {
+    android.applicationVariants.forEach { variant ->
+        def variantCapped = variant.name.capitalize()
+        def variantLowered = variant.name.toLowerCase()
 
-    def zipName = "riru-${versionNameShort}-${variantLowered}.zip"
+        def zipName = "riru-${versionNameShort}-${variantLowered}.zip"
+        def magiskDir = file("$outDir/magisk_module_$variantLowered")
 
-    def is_windows = OperatingSystem.current().isWindows()
+        task("prepareMagiskFiles${variantCapped}", type: Sync) {
+            dependsOn("assemble$variantCapped")
+            dependsOn(":app:assemble$variantCapped")
 
-    task ("zip${variantCapped}", type: Zip) {
-        dependsOn("assemble${variantCapped}")
-        from magiskDir
-        archiveName zipName
-        destinationDir outDir
-    }
-
-    variant.outputs.all {
-        def task = variant.assembleProvider.get()
-        task.doLast {
-            // clear
-            delete { delete magiskDir }
-
-            // copy from template
-            copy {
-                from "$rootDir/template/magisk_module"
-                into magiskDir.path
-                exclude 'customize.sh', 'util_functions.sh'
+            into magiskDir
+            from("$rootDir/app/build/outputs/apk/$variantLowered/riru.apk") {
+                rename { "app.apk" }
             }
-            copy {
-                from file("$rootDir/template/magisk_module/customize.sh"), file("$rootDir/template/magisk_module/util_functions.sh")
-                into magiskDir.path
-                filter { line ->
-                    line.replaceAll('%%%RIRU_API%%%', apiVersion.toString())
-                            .replaceAll('%%%RIRU_VERSION_CODE%%%', versionCode.toString())
-                            .replaceAll('%%%RIRU_VERSION_NAME%%%', versionName)
-                }
+            from("$rootDir/template/magisk_module") {
+                exclude 'customize.sh', 'util_functions.sh', 'module.prop'
+            }
+            from("$rootDir/template/magisk_module") {
+                include 'customize.sh', 'util_functions.sh'
+                filter(ReplaceTokens.class, tokens: [
+                        "RIRU_API"         : apiVersion.toString(),
+                        "RIRU_VERSION_CODE": versionCode.toString(),
+                        "RIRU_VERSION_NAME": versionName.toString()
+                ])
                 filter(FixCrLfFilter.class,
                         eol: FixCrLfFilter.CrLf.newInstance("lf"))
             }
+            from("$rootDir/template/magisk_module") {
+                include 'module.prop'
+                expand moduleProps
+                filter(FixCrLfFilter.class,
+                        eol: FixCrLfFilter.CrLf.newInstance("lf"))
+            }
+            from("$buildDir/intermediates/stripped_native_libs/$variantLowered/out/lib") {
+                into 'lib'
+            }
+            from((variantLowered == "release") ?
+                    "$buildDir/intermediates/dex/$variantLowered/minify${variantCapped}WithR8" :
+                    "$buildDir/intermediates/dex/$variantLowered/mergeDex$variantCapped") {
+                include 'classes.dex'
+                rename { 'rirud.dex' }
+            }
+            doLast {
+                fileTree("$magiskDir").visit { f ->
+                    if (f.directory) return
+                    if (f.file.name == '.gitattributes') return
 
-            // copy .git files manually since gradle exclude it by default
-            Files.copy(file("$rootDir/template/magisk_module/.gitattributes").toPath(), file("${magiskDir.path}/.gitattributes").toPath())
-
-            // generate module.prop
-            def modulePropText = ""
-            moduleProp.each { k, v -> modulePropText += "$k=$v\n" }
-            modulePropText = modulePropText.trim()
-            file("$magiskDir/module.prop").text = modulePropText
-
-            // copy libs
-            def nativeOutDir = file("build/intermediates/cmake/$variant.name/obj")
-            copy {
-                from "$nativeOutDir"
-                into "$magiskDir/lib"
-                exclude "**/*.txt"
+                    def md = MessageDigest.getInstance("SHA-256")
+                    f.file.eachByte 4096, { bytes, size ->
+                        md.update(bytes, 0, size)
+                    }
+                    file(f.file.path + ".sha256sum").text = md.digest().encodeHex()
+                }
             }
 
-            // copy dex
-            copy {
-                from zipTree(file(outputFile)).matching { include 'classes.dex' }.singleFile
-                into magiskDir
-            }
-
-            // generate sha1sum
-            fileTree("$magiskDir").matching {
-                exclude "README.md", "META-INF"
-            }.visit { f ->
-                if (f.directory) return
-                file(f.file.path + ".sha256sum").text = sha256sum(f.file)
-            }
         }
-        task.finalizedBy("zip${variantCapped}")
-    }
 
-    task ("push${variantCapped}", type: Exec) {
-        dependsOn("assemble${variantCapped}")
-        workingDir outDir
-        def commands = [android.adbExecutable, "push",
-                        zipName,
-                        "/data/local/tmp/"]
-        if (is_windows) {
-            commandLine 'cmd', '/c', commands.join(" ")
-        } else {
-            commandLine commands
+        task("zip${variantCapped}", type: Zip) {
+            dependsOn("prepareMagiskFiles${variantCapped}")
+            from magiskDir
+            archiveName zipName
+            destinationDir outDir
         }
-    }
 
-    task("flash${variantCapped}", type: Exec) {
-        dependsOn("push${variantCapped}")
-        def commands = [android.adbExecutable, "shell", "su", "-c",
-                        "magisk --install-module /data/local/tmp/${zipName}"]
-        if (is_windows) {
-            commandLine 'cmd', '/c', commands.join(" ")
-        } else {
-            commandLine commands
+        task("push${variantCapped}", type: Exec) {
+            dependsOn("assemble${variantCapped}")
+            workingDir outDir
+            commandLine android.adbExecutable, "push", zipName, "/data/local/tmp/"
         }
-    }
 
-    task("flashAndReoot${variantCapped}", type: Exec) {
-        dependsOn("flash${variantCapped}")
-        def commands = [android.adbExecutable, "shell", "reboot"]
-        if (is_windows) {
-            commandLine 'cmd', '/c', commands.join(" ")
-        } else {
-            commandLine commands
+        task("flash${variantCapped}", type: Exec) {
+            dependsOn("push${variantCapped}")
+            commandLine android.adbExecutable, "shell", "su", "-c", "magisk --install-module /data/local/tmp/${zipName}"
         }
+
+        task("flashAndReboot${variantCapped}", type: Exec) {
+            dependsOn("flash${variantCapped}")
+            commandLine android.adbExecutable, "shell", "reboot"
+        }
+
+        variant.assembleProvider.get().dependsOn(":app:assemble${variantCapped}")
+        variant.assembleProvider.get().finalizedBy("zip${variantCapped}")
     }
-
-
 }
 

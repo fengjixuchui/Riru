@@ -26,12 +26,20 @@ Android 6.0+ devices rooted with [Magisk](https://github.com/topjohnwu/Magisk)
 
 * "Riru" app (show Riru status)
 
-  [Download](https://github.com/RikkaApps/Riru/releases/download/v23.6/riru-v23.6.r279.f990471.apk)
+  From v25.4.1, the app is bundled with the module. Create file `/data/adb/modules/riru-core/allow_install_app` to allow the module to install the app.
 
-**If you are using other modules that change `ro.dalvik.vm.native.bridge`, Riru will not work.** (Riru will automatically set it back)
+### Common problems
 
-A typical example is, some "optimize" modules change this property. Since changing this property is meaningless for "optimization", their quality is very questionable. In fact, changing properties for optimization is a joke.
+* Have low quality module that changes `ro.dalvik.vm.native.bridge` installed
 
+  **If you are using other modules that change `ro.dalvik.vm.native.bridge`, Riru will not work.** (Riru will automatically set it back)
+
+  A typical example is, some "optimize" modules change this property. Since changing this property is meaningless for "optimization", their quality is very questionable. In fact, changing properties for optimization is a joke.
+
+* Third-party ROMs have incorrect SELinux rule
+
+  <https://github.com/RikkaApps/Riru/wiki/Explanation-about-incorrect-SELinux-rules-from-third-party-ROMs-cause-Riru-not-working>
+  
 ## How Riru works?
 
 * How to inject into the zygote process?
